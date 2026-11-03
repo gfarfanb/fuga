@@ -539,19 +539,21 @@ The output is never held whole: it is paged in as the feed scrolls, and navigati
 - **Notes** — the navigation list: one line per output entry by title, the current one marked (`>`). It opens on the last session's criteria, query, output and selection exactly as they were left; on a first run it starts from the most recently modified note and its related ones.
 - **Criteria** — a tree of everything that shapes the output: source, tags, filter terms, excludes, sort, and later other modifiers. Any node can be enabled or disabled (`Space` on the focused node), and the enabled nodes compose the query behind the output: a source node is the source filter, a tag node joins on `tags.tag_key` (§8.1), a filter term goes into the FTS expression, an exclude node is the `-` side of it, and the sort node is the output order (all §9). An empty tree is the plain `notes.list`.
 - **Preview** — full height, the output as a feed: one rendered note per entry (§10.6), paged in as it scrolls, and the entry it shows is the one marked in Notes.
-- **Input** — always visible to the user, one line (`tui-input`, §4). The text goes to the active input mode (§10.2); `Enter` submits it and `Esc` returns to Normal.
-- **Input Options** — visually part of the input: the left side names the input modes, cycled with `Shift-Tab` (initial set `Search` — fuzzy finder — and `Insert` — new note); the right side lists immediate commands, first of them `?` Help.
-- **Status bar** — `notes/inbox/rust-tui.md   found 312 notes   <server-status>`: the selected note's path, the count of the current output, and the server state (starting §10.4, connected, disconnected, index progress, or an unavailable source §11). The mode name lives in Input Options, not here, and the server segment is also the way into the server-status overlay: `i`, or a click on it.
+- **Input** — always visible to the user, one line (`tui-input`, §4). The text goes to the active input mode (§10.2); `Enter` submits it and `Esc` clears it.
+- **Input Options** — visually part of the input: the left side names the input mode, cycled with `Shift-Tab` (`Search`, or `Input` for a new note); the right side lists immediate commands, first of them `?` Help.
+- **Status bar** — `notes/inbox/rust-tui.md   found 312 notes   <server-status>`: the selected note's path, the count of the current output, and the server state (starting §10.4, connected, disconnected, index progress, or an unavailable source §11). The input's label lives in Input Options, not here, and the server segment is also the way into the server-status overlay: `i`, or a click on it.
 
-**Session state.** The view state — criteria tree and its enabled nodes, active query and input mode, output and its position, selected note, scroll and feed position, input history — is written to `<data dir>/fuga/session.json` (debounced on change, and on exit) and read back at startup, so the app opens in the shape it was left. It holds view state only, never note content: the results are the server's answer to the restored query, not a cached copy. An unreadable or unknown-version file is ignored and the defaults above apply.
+**Session state.** The view state — criteria tree and its enabled nodes, active query and input mode, output and its position, selected note, scroll and feed position, input history — is written to `<data dir>/fuga/session.json` (debounced on change, and on exit) and read back at startup, so the app opens in the shape it was left, input mode included: the mode restored is the last one the user used, never a fixed one. It holds view state only, never note content: the results are the server's answer to the restored query, not a cached copy. An unreadable or unknown-version file is ignored and the defaults above apply, `Search` (§10.2) among them.
 
 Overlays: help and server status. The fuzzy finder, the new-note prompt and the search-results overlay are gone — the input line, the Notes pane and the feed replace them — and the one-line server state moved to the status bar.
 
 ### 10.2 Modes
 
-`Normal` · `Search` · `Insert` · `Help`
+`Search` · `Input`
 
-`Normal` is the default and the keymap (§10.3) is live. `Shift-Tab` cycles the input modes; in an input mode the input line has focus, `Enter` submits, and `Esc` returns to `Normal` without submitting. `Search` is the search input — the fuzzy finder over titles, aliases and paths (`Ctrl-P`) and a full-text query on the same line (`/`, §9) — and `Insert` is new-note capture (`n`). `Help` is the `?` overlay, also reachable from Input Options as an immediate command.
+`Search` is the default and `Shift-Tab` cycles the two. There is no third mode and nothing is modal: the keymap (§10.3) acts while the input line is empty and the first printable key starts the text, and a mode shortcut selects a mode rather than a keystroke context — `/` and `Ctrl-P` give `Search` (a full-text query §9, or the fuzzy finder over titles, aliases and paths) and `n` gives `Input` (a capture in the source's `capture_dir`). `Enter` submits, leaving the line empty and ready for the next one, and a submitted or cancelled capture returns to `Search`; `Esc` clears the line. The active mode is named in Input Options and is session state, so a session opens with the mode it was left in, `Search` on a first run (§10.1).
+
+Help and server status are overlays, not modes: `?` and `i` open them, `Esc` or the same key closes them, and the input line keeps its content underneath.
 
 ### 10.3 Default Keymap (configurable)
 
@@ -560,10 +562,10 @@ Overlays: help and server status. The fuzzy finder, the new-note prompt and the 
 | `j` / `k`, arrows | Move selection (Notes, Criteria, Preview feed) | `select_next` / `select_prev` |
 | `Enter` | Open or follow link; submit the input line | `open` |
 | `Tab` | Cycle focus: notes, criteria, preview, input | `focus_next` |
-| `Shift-Tab` | Cycle input modes: `Search`, `Insert` (config `backtab`) | `input_mode` |
+| `Shift-Tab` | Cycle input modes: `Search`, `Input` (config `backtab`) | `input_mode` |
 | `Space` | Toggle the focused Criteria node on or off | `toggle_criterion` |
-| `Esc` | Leave the input line (back to `Normal`), close help | `cancel` |
-| `n` | New note: `Insert` mode (capture in the source's `capture_dir`) | `capture` |
+| `Esc` | Clear the input line, cancel a capture back to `Search`, close help or server status | `cancel` |
+| `n` | New note: `Input` mode (capture in the source's `capture_dir`) | `capture` |
 | `Ctrl-P` | `Search` mode: fuzzy finder | `finder` |
 | `/` | `Search` mode: full-text search | `search` |
 | `t` | Focus the Criteria tree (tags, §9) | `tags` |
