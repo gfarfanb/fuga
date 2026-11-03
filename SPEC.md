@@ -26,7 +26,7 @@ The TUI is the first client, not the product. Anything the TUI can do is a serve
 - Instant startup, fast search over thousands of notes.
 - Single static binary per component, same behavior on Linux and Windows.
 - Index is disposable: deleting it and rebuilding must always be safe.
-- The API is the contract; the TUI holds no state the server cannot rebuild.
+- The API is the contract; the TUI owns no note data of its own, only view state (§10.1).
 
 ### 1.2 Non-Goals (v1)
 
@@ -47,13 +47,14 @@ The TUI is the first client, not the product. Anything the TUI can do is a serve
 | F2 | Quick capture: create a note from a single keystroke, with timestamped ID/title | Must |
 | F3 | Parse frontmatter (title, aliases, tags, created) | Must |
 | F4 | Parse `[[wikilinks]]`, `[[target\|alias]]`, `[[target#heading]]` | Must |
-| F5 | Backlinks panel for the selected note | Must |
+| F5 | Backlinks for the selected note, surfaced in the feed as related-by-reference (§10.1) | Must |
 | F6 | Fuzzy finder over note titles and aliases | Must |
 | F7 | Full-text search with ranking and snippets | Must |
-| F8 | Tag browser and filter | Should |
+| F8 | Criteria tree: sources, tags and filter terms, each toggled on and off to shape the note output | Should |
 | F9 | Live reindex on external file changes | Should |
 | F10 | Unlinked mentions (title appears in text but is not linked) | Should |
 | F11 | Create note from a dangling link | Should |
+| F12 | Restore the last session: criteria, query, output and position as the user left them; the idle output is the most recent note and its related notes | Must |
 | F13 | Graph or "related notes" view | Could |
 | F14 | Rename note and update inbound links | Could |
 | F15 | Headless API usable without the TUI | Must |
@@ -73,7 +74,7 @@ The TUI is the first client, not the product. Anything the TUI can do is a serve
 |---------|-------|-------|
 | TUI rendering | `ratatui` | Immediate-mode widgets |
 | Terminal backend | `crossterm` | Windows and Unix support |
-| Single-line text input | `tui-input` | Prompt, search, and finder fields |
+| Single-line text input | `tui-input` | The input line's search and new-note fields |
 | Markdown parsing | `pulldown-cmark` | Event-based; wikilinks handled by a custom pass |
 | Frontmatter | `serde` + `serde_yaml_ng` | Typed struct with permissive defaults |
 | Database | `rusqlite` (feature `bundled`) | Bundles SQLite with FTS5; no system dependency |
@@ -175,8 +176,9 @@ fuga/
 │   │       ├── theme.rs
 │   │       └── views/
 │   │           ├── list.rs
+│   │           ├── criteria.rs
 │   │           ├── preview.rs
-│   │           ├── backlinks.rs
+│   │           ├── input.rs
 │   │           ├── finder.rs
 │   │           └── search.rs
 │   └── fuga-cli/             # builds the `fuga` binary: `server start` + headless commands
@@ -211,6 +213,7 @@ Core methods (v1), all scoped by source where relevant:
 | `links.unlinked` | Unlinked mentions of a title or alias |
 | `search.fuzzy` | Ranked title/alias/path matches |
 | `search.fulltext` | FTS5 query with snippets |
+| `notes.related` | Notes related to a note: inbound links first, then shared tags |
 | `tags.list` / `tags.notes` | Tag browser |
 | `index.status` / `index.rebuild` | Progress and forced rebuild |
 | `index.reindex` | Reindex one note from disk now, past the fast path |
@@ -221,6 +224,8 @@ Core methods (v1), all scoped by source where relevant:
 - **Write conflicts:** `notes.get` returns the body's `base_hash` (the `blake3` the index stores, §6.4), and `notes.write` takes it back as an optional precondition. The server reads the file and compares before writing anything: on mismatch it writes nothing and answers with a `conflict` error carrying the current hash. The check and the temp-file write plus rename happen back to back in the same write path, so the residual window is a local race the spec accepts (the watcher catches any later change anyway). A write without `base_hash` is unconditional, last writer wins. Atomic rename alone never prevented this; it only prevents torn files.
 
 - **Forced reindex.** `index.reindex` takes the note key (`{ source, path }`) and runs §7.1's pipeline for that one file with the `(mtime_ns, size)` fast path skipped, then re-resolves the links that target the note and emits `note.changed`; if the file is no longer there it drops the row and emits `note.removed`, exactly as the watcher would. The reply is empty. It is the forced form of the watcher's `Modified` path, for a client that wrote a file behind the server's back and knows it: `$EDITOR` (§10.5) is the case in v1, where the watcher may be off (`[index] watch = false`) or up to `poll_interval_ms` behind (§12). An unknown source is `not_found`; a disabled or missing one is `source_unavailable` (§11).
+
+- **Related notes.** `notes.related` takes the note key (`{ source, path }`) plus `{ limit, cursor }` and returns other notes in two tiers: notes that link to it (`links.target_note_id`, §6.3) first, then notes sharing its `tag_key`s (§8.1), most shared first, ties broken by `mtime_ns` desc. The note itself is never returned, and like every search it spans all enabled sources unless a source filter is given. It is the feed's source when no query is active (§10.1); the two tiers are one ranked list, so one page can hold both.
 
 - **Error codes.** JSON-RPC 2.0 reserves the framing codes and fuga adds nothing outside the implementation-defined server range (-32000..-32099). A client switches on `code`, never on `message`.
 
@@ -236,13 +241,13 @@ Core methods (v1), all scoped by source where relevant:
   | -32003 | `source_unavailable` | Root missing, or a write against a disabled source (§11) |
   | -32004 | `io_error` | Filesystem failure; `data.path` where known |
 
-- **Pagination.** Every list-shaped reply (`notes.list`, `search.fuzzy`, `search.fulltext`, `links.backlinks`, `links.unlinked`, `tags.list`, `tags.notes`) takes `{ limit, cursor }` and returns `{ items, next_cursor }`. `limit` defaults to 50 and is clamped to 1..=500; `cursor` is opaque, omitted or `null` for the first page, and `null` in the reply on the last page. A client never parses or constructs one, and a cursor from a different method or filter is `invalid params`. Opaque rather than an offset on purpose: `notes.list` and `search.fulltext` order by mtime and bm25 rank over an index the watcher mutates, so an offset would silently skip or repeat rows between pages.
+- **Pagination.** Every list-shaped reply (`notes.list`, `notes.related`, `search.fuzzy`, `search.fulltext`, `links.backlinks`, `links.unlinked`, `tags.list`, `tags.notes`) takes `{ limit, cursor }` and returns `{ items, next_cursor }`. `limit` defaults to 50 and is clamped to 1..=500; `cursor` is opaque, omitted or `null` for the first page, and `null` in the reply on the last page. A client never parses or constructs one, and a cursor from a different method or filter is `invalid params`. Opaque rather than an offset on purpose: `notes.list` and `search.fulltext` order by mtime and bm25 rank over an index the watcher mutates, so an offset would silently skip or repeat rows between pages.
 
 - **Subscription filters.** `events.subscribe` takes `{ source?, events? }`, both optional and absent meaning all. `source` matches a `sources.name` exactly, the same name the note key uses above. `events` is drawn from the closed set `note.changed`, `note.removed`, `index.progress`. A filter narrows only that connection's stream; it is per-connection state (§5.4), replaced by the next `events.subscribe` and dies with the connection. There is no unsubscribe call and no per-note filter.
 
 - **`index.progress` payload.** `{ source, done, total }`. `total` is the walk's best-effort count and may grow if a file appears mid-scan; `done == total` marks the pass complete. Emitted at most once per 500-note transaction (§7.1) plus once at completion. Like every event it is a hint: a client that misses one shows unknown progress, not a stuck one.
 
-- **Events are a hint, not a log (the reconnect contract).** `events.subscribe` has no backlog and no resume cursor: the server does not buffer events for a client that is not connected, and there is no sequence number to resume from. A dropped connection therefore loses an unbounded number of `note.changed` / `note.removed` events, and no event stream is the source of truth for a client's state. Convergence is the client's job on reconnect: it re-fetches **every view it caches** — `handshake`, `notes.list`, and the preview, backlinks, and open search results for the selected note — because a fresh list alone leaves a stale body or backlink panel displaying silently out-of-date content. Events arriving after a subscribe are applied on top of that resync and may be redundant. A client that loaded a note body keeps the `base_hash` it got with it and echoes it on `notes.write`, so a change it missed during the gap surfaces as a `conflict` on save instead of being silently overwritten. This is deliberate: at 50k notes a resume cursor would mean either server-side retention per client or a change journal, and a local single-writer app re-fetches titles in one paged call. The cost is the reconnect refetch; that cost is the contract.
+- **Events are a hint, not a log (the reconnect contract).** `events.subscribe` has no backlog and no resume cursor: the server does not buffer events for a client that is not connected, and there is no sequence number to resume from. A dropped connection therefore loses an unbounded number of `note.changed` / `note.removed` events, and no event stream is the source of truth for a client's state. Convergence is the client's job on reconnect: it re-fetches **every view it caches** — `handshake`, `notes.list`, and the preview, the related feed, and any open search results for the selected note — because a fresh list alone leaves a stale body or stale backlinks displaying silently out-of-date content. Events arriving after a subscribe are applied on top of that resync and may be redundant. A client that loaded a note body keeps the `base_hash` it got with it and echoes it on `notes.write`, so a change it missed during the gap surfaces as a `conflict` on save instead of being silently overwritten. This is deliberate: at 50k notes a resume cursor would mean either server-side retention per client or a change journal, and a local single-writer app re-fetches titles in one paged call. The cost is the reconnect refetch; that cost is the contract.
 
 ### 5.4 Threading Model (server)
 
@@ -484,11 +489,13 @@ Digits stay attached to the preceding word (`h264`, `a11y`). Each word is lowerc
 
 | Mode | Backend | Scope | Trigger |
 |------|---------|-------|---------|
-| Fuzzy find | `nucleo` over in-memory list of titles, aliases, paths | Fast jump to note | `Ctrl-P` |
-| Full text | FTS5 `MATCH` with bm25 | Titles, bodies (tag filter joins `tags`) | `/` |
-| Tag filter | `tags` table | Notes by tag(s) | `t` |
-| Backlinks | `links` by `target_note_id` | Inbound links with line context | Always visible |
+| Fuzzy find | `nucleo` over in-memory list of titles, aliases, paths | Fast jump to note | `Ctrl-P`, or the input line in `Search` mode (§10.2) |
+| Full text | FTS5 `MATCH` with bm25 | Titles, bodies (tag filter joins `tags`) | `/`, or a `/` query in the input line |
+| Tag filter | `tags` table | Notes by tag(s) | `t` focuses the Criteria tree; toggling a tag node |
+| Backlinks | `links` by `target_note_id` | Inbound links with line context | Feed, related by reference (§10.1) |
 | Unlinked mentions | FTS phrase query on title and aliases, minus linked notes | Suggest links | `u` |
+
+Every filter above is a node in the TUI's Criteria tree (§10.1): source, tags, filter terms, excludes and sort. Toggling a node adds or removes that filter from the output. With no query active the output is the selected note's related notes — inbound links first, then shared tags (`notes.related`, §5.3).
 
 Query syntax in full-text mode: plain words (implicit AND), `"phrases"`, `tag:rust`, `-exclude`. `tag:` terms canonicalize to a `tag_key` (§8.1) and become a join on `tags`; the rest is parsed into an FTS5 expression with proper escaping to avoid FTS syntax errors from user input. Every search takes an optional source filter; with several sources configured the TUI defaults to all enabled sources.
 
@@ -501,40 +508,71 @@ Large sources (50k+ notes) are supported by never holding note bodies in memory:
 ### 10.1 Layout
 
 ```
-┌ Notes ─────────────┬ Preview ───────────────────────────┐
-│ > Rust TUI stack   │ # Rust TUI stack                   │
-│   SQLite FTS5      │ See SQLite FTS5 and schema ...     │
-│   Index design     │                                    │
-│   ...              ├ Backlinks (2) ─────────────────────┤
-│                    │ Index design:14  "uses [[Rust..."  │
-│                    │ Rust TUI stack:7                   │
-├────────────────────┴────────────────────────────────────┤
-│ NORMAL  notes/inbox/rust-tui.md   312 notes  indexed ✓  │
-└─────────────────────────────────────────────────────────┘
+┌─Notes───────────────┬─Preview─────────────────────────────────────────────┐
+│ > Rust TUI stack    │ # Rust TUI stack                                    │
+│   SQLite FTS5       │ See SQLite FTS5 and schema ...                      │
+│   Index design      │                                                     │
+│                     │                                                     │
+├─Criteria────────────┤                                                     │
+│ ▾ Source            │                                                     │
+│   [x] notes         │                                                     │
+│ ▾ Tags              │                                                     │
+│   [x] #rust         │                                                     │
+│   [ ] #tui          │                                                     │
+│ ▾ Filters           │                                                     │
+│   [x] fts5          │                                                     │
+├─────────────────────┴─────────────────────────────────────────────────────┤
+│ Input fts                                                                 │
+│ Search                                                           ? Help   │
+├───────────────────────────────────────────────────────────────────────────┤
+│ notes/inbox/rust-tui.md                      found 312 notes   server ✓   │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
-Overlays: fuzzy finder (centered popup), search results, new-note prompt, help, server status.
+Notes and Preview are two views of one ordered **output**: the Notes list is the navigation list by name, the Preview is the same sequence as a feed. What fills it:
+
+- With a query active, the search results (§9): plain text is the fuzzy finder, `/` is full-text.
+- With none, the selected note's **related** notes — by reference first (inbound links), then by similar tags (`notes.related`, §5.3). A session with nothing to restore starts from the most recently modified note.
+
+The output is never held whole: it is paged in as the feed scrolls, and navigating or changing a criterion replaces or extends the sequence. Related notes are computed for the note the feed is on.
+
+- **Notes** — the navigation list: one line per output entry by title, the current one marked (`>`). It opens on the last session's criteria, query, output and selection exactly as they were left; on a first run it starts from the most recently modified note and its related ones.
+- **Criteria** — a tree of everything that shapes the output: source, tags, filter terms, excludes, sort, and later other modifiers. Any node can be enabled or disabled (`Space` on the focused node), and the enabled nodes compose the query behind the output: a source node is the source filter, a tag node joins on `tags.tag_key` (§8.1), a filter term goes into the FTS expression, an exclude node is the `-` side of it, and the sort node is the output order (all §9). An empty tree is the plain `notes.list`.
+- **Preview** — full height, the output as a feed: one rendered note per entry (§10.6), paged in as it scrolls, and the entry it shows is the one marked in Notes.
+- **Input** — always visible to the user, one line (`tui-input`, §4). The text goes to the active input mode (§10.2); `Enter` submits it and `Esc` returns to Normal.
+- **Input Options** — visually part of the input: the left side names the input modes, cycled with `Shift-Tab` (initial set `Search` — fuzzy finder — and `Insert` — new note); the right side lists immediate commands, first of them `?` Help.
+- **Status bar** — `notes/inbox/rust-tui.md   found 312 notes   <server-status>`: the selected note's path, the count of the current output, and the server state (starting §10.4, connected, disconnected, index progress, or an unavailable source §11). The mode name lives in Input Options, not here, and the server segment is also the way into the server-status overlay: `i`, or a click on it.
+
+**Session state.** The view state — criteria tree and its enabled nodes, active query and input mode, output and its position, selected note, scroll and feed position, input history — is written to `<data dir>/fuga/session.json` (debounced on change, and on exit) and read back at startup, so the app opens in the shape it was left. It holds view state only, never note content: the results are the server's answer to the restored query, not a cached copy. An unreadable or unknown-version file is ignored and the defaults above apply.
+
+Overlays: help and server status. The fuzzy finder, the new-note prompt and the search-results overlay are gone — the input line, the Notes pane and the feed replace them — and the one-line server state moved to the status bar.
 
 ### 10.2 Modes
 
-`Normal` · `Finder` · `Search` · `Prompt` · `Help`
+`Normal` · `Search` · `Insert` · `Help`
+
+`Normal` is the default and the keymap (§10.3) is live. `Shift-Tab` cycles the input modes; in an input mode the input line has focus, `Enter` submits, and `Esc` returns to `Normal` without submitting. `Search` is the search input — the fuzzy finder over titles, aliases and paths (`Ctrl-P`) and a full-text query on the same line (`/`, §9) — and `Insert` is new-note capture (`n`). `Help` is the `?` overlay, also reachable from Input Options as an immediate command.
 
 ### 10.3 Default Keymap (configurable)
 
 | Key | Action | Action id |
 |-----|--------|-----------|
-| `j` / `k`, arrows | Move selection | `select_next` / `select_prev` |
-| `Enter` | Open or follow link | `open` |
-| `Tab` | Cycle focus: list, preview, backlinks | `focus_next` |
-| `n` | Quick capture (new note in the source's `capture_dir`) | `capture` |
-| `Ctrl-P` | Fuzzy finder | `finder` |
-| `/` | Full-text search | `search` |
-| `t` | Tag browser | `tags` |
+| `j` / `k`, arrows | Move selection (Notes, Criteria, Preview feed) | `select_next` / `select_prev` |
+| `Enter` | Open or follow link; submit the input line | `open` |
+| `Tab` | Cycle focus: notes, criteria, preview, input | `focus_next` |
+| `Shift-Tab` | Cycle input modes: `Search`, `Insert` (config `backtab`) | `input_mode` |
+| `Space` | Toggle the focused Criteria node on or off | `toggle_criterion` |
+| `Esc` | Leave the input line (back to `Normal`), close help | `cancel` |
+| `n` | New note: `Insert` mode (capture in the source's `capture_dir`) | `capture` |
+| `Ctrl-P` | `Search` mode: fuzzy finder | `finder` |
+| `/` | `Search` mode: full-text search | `search` |
+| `t` | Focus the Criteria tree (tags, §9) | `tags` |
 | `s` | Switch source | `switch_source` |
 | `Ctrl-E` | Edit in `$EDITOR` | `edit_external` |
 | `u` | Unlinked mentions (§9) | `unlinked` |
 | `Ctrl-O` / `Ctrl-I` | Navigation history back / forward | `history_back` / `history_forward` |
 | `?` | Help | `help` |
+| `i` | Server status overlay, same as clicking the status-bar segment | `server_status` |
 | `q` | Quit | `quit` |
 
 `[keymap]` (§11) rebinds any of these by action id. A key string is `crossterm`'s spelling: a bare character (`e`), the prefixes `ctrl-`, `alt-`, `shift-` (`ctrl-e`, `alt-e`, `ctrl-shift-p`), and the named keys (`enter`, `esc`, `tab`, `backtab`, arrows, `f1`–`f12`). A string that does not parse, an unknown action id, or two actions on one key is a config error at startup.
@@ -543,9 +581,9 @@ Because the map is rebindable, the defaults only have to be safe, and `Ctrl-E` i
 
 ### 10.4 Server Connection and Startup
 
-- On launch the TUI connects to the configured socket and calls `handshake`. If no server is running it starts one (`fuga server start`) and waits for the socket, with a visible "starting server" state and a timeout. On Windows the child is created with `CREATE_NO_WINDOW` (plus `DETACHED_PROCESS` for `--daemon`) and null stdio, so no console window flashes over the alternate screen and the child never writes into the TUI's console.
-- If the connection drops, the TUI shows a disconnected banner, retries with backoff, and re-syncs from `handshake`, a fresh list, and a refetch of every cached view for the selected note — it does not exit and does not lose unsaved input buffers. Events carry no backlog (§5.3), so this refetch, not the event stream, is what makes the client correct after a gap.
-- The TUI holds no authoritative state: every mutation is a server call, and every local view is refreshed from server events.
+- On launch the TUI connects to the configured socket and calls `handshake`. If no server is running it starts one (`fuga server start`) and waits for the socket, with a visible "starting server" state in the status bar and a timeout. On Windows the child is created with `CREATE_NO_WINDOW` (plus `DETACHED_PROCESS` for `--daemon`) and null stdio, so no console window flashes over the alternate screen and the child never writes into the TUI's console.
+- If the connection drops, the TUI shows a disconnected banner, retries with backoff, and re-syncs from `handshake`, a fresh list, and a refetch of every cached view for the selected note (body, backlinks, related feed) — it does not exit and does not lose unsaved input buffers. Events carry no backlog (§5.3), so this refetch, not the event stream, is what makes the client correct after a gap.
+- The TUI holds no authoritative state: every mutation is a server call, and every local view is refreshed from server events. View state (criteria, output, position) is local and persisted (§10.1); note data never is.
 
 ### 10.5 Editor Handling
 
@@ -641,7 +679,7 @@ Config is read once at startup. Adding or removing a source, or changing its opt
 | Search | Golden queries with `insta` snapshots; `tag:` spellings that must all hit the same tag |
 | Protocol | Round-trip serialization tests for every request/response type; malformed-input tests must not kill the connection |
 | Server | In-process server on a temp socket; integration tests for dispatch, subscriptions, and concurrent clients |
-| TUI | Render to `ratatui::backend::TestBackend`, snapshot buffers, with a fake client |
+| TUI | Render to `ratatui::backend::TestBackend`, snapshot buffers, with a fake client; session save/restore round-trips, and a missing or corrupt session file falls back to defaults |
 | Watcher | Integration test with real FS events and generous timeouts |
 | CI | GitHub Actions matrix: ubuntu and windows, `cargo test`, `clippy -D warnings`, `fmt --check` |
 
@@ -654,11 +692,11 @@ Config is read once at startup. Adding or removing a source, or changing its opt
 | M0 | Skeleton | Workspace, CI, config with sources, terminal setup and teardown with panic hook |
 | M1 | Core read path | Source walk, parser, SQLite schema, full index; CLI `fuga index` |
 | M2 | Protocol | `fuga-protocol` types, local socket server, `fuga-client`, `fuga server start` |
-| M3 | Browse | TUI connects to server: note list, preview, open in `$EDITOR`, reindex on return |
-| M4 | Links | Wikilink resolution, backlinks panel, follow link, history |
-| M5 | Search | Fuzzy finder and FTS search with snippets |
+| M3 | Browse | TUI connects to server: layout (notes, criteria, preview, input, status bar), output and feed (related by reference and shared tags), session save/restore, open in `$EDITOR`, reindex on return |
+| M4 | Links | Wikilink resolution, backlinks as feed entries, follow link, history |
+| M5 | Search | Input line and modes, fuzzy finder, FTS search with snippets |
 | M6 | Capture | Quick capture, dangling-link note creation |
 | M7 | Live | File watcher, incremental indexing, server events and client reconnection |
 | M8 | Multi-source | Source switching, per-source config, cross-source list and search filters |
-| M9 | Polish | Tags browser, unlinked mentions, themes, config, release builds, node-per-heading style notes |
+| M9 | Polish | Tags and filter terms as criteria-tree nodes, unlinked mentions, themes, config, release builds, node-per-heading style notes |
 | M10+ | Stretch | Rename with link rewrite, graph view, additional clients, built-in editor (§10.5) |
