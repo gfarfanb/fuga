@@ -435,7 +435,7 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 2. For each file, look it up by `path_key` (§12) and compare `(mtime_ns, size)` to the DB. If unchanged, skip.
 3. If changed, read the file, compute `blake3`; if the hash is equal, update mtime only.
 4. Otherwise parse and upsert note, aliases, tags, links in one transaction.
-5. Delete the rows whose `path_key` the walk did not produce. Not "rows whose file no longer exists": `Path::exists` answers yes for a stored path that differs from the disk only in case or Unicode normal form, which is exactly the case this step has to clean up (§12).
+5. Delete the rows whose `path_key` the walk did not produce. Not "rows whose file no longer exists": `Path::exists` answers yes for a stored path that differs from the disk only in case or Unicode normal form, which is exactly the case this step has to clean up (§12). This pass runs only for a source whose root was read successfully: an unavailable root (§11) marks the source unavailable and deletes nothing, so its notes stay in the index (§7.2).
 6. **Second pass:** re-resolve all dangling and affected links (needed because a new note can satisfy old links).
 
 Batch work in transactions of about 500 notes. Report progress through `index.progress` events.
