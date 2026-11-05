@@ -562,7 +562,7 @@ Help and server status are overlays, not modes: `Ctrl-Shift-'` and `Ctrl-B` open
 | `Enter` | Open or follow link; submit the input line | `open` |
 | `Shift-<arrow>` | Move focus: notes, criteria, preview, input | `focus_panel` |
 | `Shift-Tab` | Cycle input modes: `Search`, `Input` (config `backtab`) | `input_mode` |
-| `Space` | Toggle the focused Criteria node on or off | `toggle_criterion` |
+| `Space` | Toggle the focused Criteria node on or off (only when the Criteria panel has focus) | `toggle_criterion` |
 | `Esc` | Clear the input line, cancel a capture back to `Search`, close help or server status | `cancel` |
 | `Ctrl-S` | Cycle `Search` mode: fuzzy finder, full-text search | `search_mode` |
 | `Ctrl-E` | Edit in `$EDITOR` | `edit_external` |
