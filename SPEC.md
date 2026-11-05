@@ -92,7 +92,7 @@ The TUI is the first client, not the product. Anything the TUI can do is a serve
 
 **Concurrency decision:** use plain OS threads and `crossbeam-channel` rather than `tokio`. The workload is file I/O, SQLite, and a local socket, not network services; this keeps the dependency graph and mental model small. One thread per client connection is enough for a handful of local clients.
 
-**Editor decision:** v1 ships no built-in editor. In-place editing is `$EDITOR` (§10.5) and the single-line inputs (new-note prompt, search, fuzzy finder) are `tui-input` — a one-line field, not the multi-line textarea that is the TUI dependency most likely to lag `ratatui`. A future built-in editor (§14, M10+) stays in its own `views/` module, and a view names its widget crate only in that module, so adding or replacing one touches nothing else.
+**Editor decision:** v1 ships no built-in editor. In-place editing is `$EDITOR` (§10.5) and the input line's search and new-note fields are `tui-input` — a one-line field, not the multi-line textarea that is the TUI dependency most likely to lag `ratatui`. A future built-in editor (§14, M10+) stays in its own `views/` module, and a view names its widget crate only in that module, so adding or replacing one touches nothing else.
 
 **Dependency pinning:** `fuga-tui` picks the `ratatui` major and `crossterm` follows it; the widget crate (`tui-input`) is chosen to fit that pair, never the reverse. Two `ratatui` majors can coexist in one build graph, but their types do not interoperate — a widget built against one cannot be handed a `Frame` or `Buffer` from the other — so the TUI's whole dependency set shares a single major.
 
@@ -178,9 +178,7 @@ fuga/
 │   │           ├── list.rs
 │   │           ├── criteria.rs
 │   │           ├── preview.rs
-│   │           ├── input.rs
-│   │           ├── finder.rs
-│   │           └── search.rs
+│   │           └── input.rs
 │   └── fuga-cli/             # builds the `fuga` binary: `server start` + headless commands
 ├── tests/fixtures/sources/   # sample notes for integration tests
 └── docs/
