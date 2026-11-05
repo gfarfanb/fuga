@@ -538,7 +538,7 @@ The output is never held whole: it is paged in as the feed scrolls, and navigati
 - **Criteria** — a tree of everything that shapes the output: source, tags, filter terms, excludes, sort, and later other modifiers. Any node can be enabled or disabled (`Space` on the focused node), and the enabled nodes compose the query behind the output: a source node is the source filter, a tag node joins on `tags.tag_key` (§8.1), a filter term goes into the FTS expression, an exclude node is the `-` side of it, and the sort node is the output order (all §9).
 - **Preview** — full height, the output as a feed: one rendered note per entry (§10.6), paged in as it scrolls, and the entry it shows is the one marked in Notes.
 - **Input** — always visible to the user, one line (`tui-input`, §4). The text goes to the active input mode (§10.2); `Enter` submits it and `Esc` clears it.
-- **Input Options** — visually part of the input: the left side names the input mode, cycled with `Shift-Tab` (`Search`, or `Input` for a new note); the right side lists immediate commands, first of them `Ctrl-Shift-'` Help.
+- **Input Options** — visually part of the input: the left side names the input mode, cycled with `Shift-Tab` (`Search`, or `Capture` for a new note); the right side lists immediate commands, first of them `Ctrl-Shift-'` Help.
 - **Status bar** — `notes/inbox/rust-tui.md   found 312 notes   <server-status>`: the selected note's path, the count of the current output, and the server state (starting §10.4, connected, disconnected, index progress, or an unavailable source §11). The input's label lives in Input Options, not here, and the server segment is also the way into the server-status overlay: `Ctrl-B`, or a click on it.
 
 **Session state.** The view state — criteria tree and its enabled nodes, active query and input mode, output and its position, selected note, anchor note, scroll and feed position, input history — is written to `<data dir>/fuga/session.json` (debounced on change, and on exit) and read back at startup, so the app opens in the shape it was left, input mode included: the mode restored is the last one the user used, never a fixed one. It holds view state only, never note content: the results are the server's answer to the restored query, not a cached copy. An unreadable or unknown-version file is ignored and the defaults above apply, `Search` (§10.2) among them.
@@ -547,9 +547,9 @@ Overlays: help and server status. The fuzzy finder, the new-note prompt and the 
 
 ### 10.2 Modes
 
-`Search` · `Input`
+`Search` · `Capture`
 
-`Search` is the default and `Shift-Tab` cycles the two. There is no third mode and nothing is modal: the keymap (§10.3) acts while the input line is empty and the first printable key starts the text, and a mode shortcut selects a mode rather than a keystroke context — `Ctrl-S` cycles the `Search` sub-mode between the fuzzy finder over titles, aliases and paths and a full-text query (§9), and `Shift-Tab` selects `Input`, a capture in the source's `capture_dir`. `Enter` submits, leaving the line empty and ready for the next one, and a submitted or cancelled capture returns to `Search`; `Esc` clears the line. An empty `Input` line submits too, as the timestamp-titled note F2 promises: `<id>.md` in `capture_dir` with the id as its title (§5.3, §6.2), so a capture needs no text; `Esc` is the way out without creating one. The active mode is named in Input Options and is session state, so a session opens with the mode it was left in, `Search` on a first run (§10.1).
+`Search` is the default and `Shift-Tab` cycles the two. There is no third mode and nothing is modal: the keymap (§10.3) acts while the input line is empty and the first printable key starts the text, and a mode shortcut selects a mode rather than a keystroke context — `Ctrl-S` cycles the `Search` sub-mode between the fuzzy finder over titles, aliases and paths and a full-text query (§9), and `Shift-Tab` selects `Capture`, a capture in the source's `capture_dir`. `Enter` submits, leaving the line empty and ready for the next one, and a submitted or cancelled capture returns to `Search`; `Esc` clears the line. An empty `Capture` line submits too, as the timestamp-titled note F2 promises: `<id>.md` in `capture_dir` with the id as its title (§5.3, §6.2), so a capture needs no text; `Esc` is the way out without creating one. The active mode is named in Input Options and is session state, so a session opens with the mode it was left in, `Search` on a first run (§10.1).
 
 Help and server status are overlays, not modes: `Ctrl-Shift-'` and `Ctrl-B` open them, `Esc` or the same key closes them, and the input line keeps its content underneath.
 
@@ -559,7 +559,7 @@ Help and server status are overlays, not modes: `Ctrl-Shift-'` and `Ctrl-B` open
 |-----|--------|-----------|
 | `Enter` | Open or follow link; submit the input line | `open` |
 | `Shift-<arrow>` | Move focus: notes, criteria, preview, input | `focus_panel` |
-| `Shift-Tab` | Cycle input modes: `Search`, `Input` (config `backtab`) | `input_mode` |
+| `Shift-Tab` | Cycle input modes: `Search`, `Capture` (config `backtab`) | `input_mode` |
 | `Space` | Toggle the focused Criteria node on or off (only when the Criteria panel has focus) | `toggle_criterion` |
 | `Esc` | Clear the input line, cancel a capture back to `Search`, close help or server status | `cancel` |
 | `Ctrl-S` | Cycle `Search` mode: fuzzy finder, full-text search | `search_mode` |
