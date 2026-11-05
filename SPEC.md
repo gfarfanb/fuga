@@ -493,7 +493,7 @@ Digits stay attached to the preceding word (`h264`, `a11y`). Each word is lowerc
 | Backlinks | `links` by `target_note_id` | Inbound links | Feed, related by reference (§10.1) |
 | Unlinked mentions | FTS phrase query on title and aliases, minus linked notes | Suggest links | a Criteria tree node for the selected note |
 
-Every filter above is a node in the TUI's Criteria tree (§10.1): source, tags, filter terms, excludes and sort. Toggling a node adds or removes that filter from the output. With no query active the output is the anchor note's related notes — inbound links first, then shared tags (`notes.related`, §5.3). The backlinks view is the feed filtered to inbound links and shows the linking notes; the line context in the `links.backlinks` payload is for API clients (F15) and the TUI does not render it.
+Every filter above is a node in the TUI's Criteria tree (§10.1): source, tags, filter terms, excludes and sort. Toggling a node adds or removes that filter from the output. With no query active the output is the anchor note and its related notes — the anchor first, then inbound links, then shared tags (`notes.related`, §5.3). The backlinks view is the feed filtered to inbound links and shows the linking notes; the line context in the `links.backlinks` payload is for API clients (F15) and the TUI does not render it.
 
 Query syntax in full-text mode: plain words (implicit AND), `"phrases"`, `tag:rust`, `-exclude`. `tag:` terms canonicalize to a `tag_key` (§8.1) and become a join on `tags`; the rest is parsed into an FTS5 expression with proper escaping to avoid FTS syntax errors from user input. Every search takes an optional source filter; with several sources configured the TUI defaults to all enabled sources.
 
@@ -530,7 +530,7 @@ Large sources (50k+ notes) are supported by never holding note bodies in memory:
 Notes and Preview are two views of one ordered **output**: the Notes list is the navigation list by name, the Preview is the same sequence as a feed. What fills it:
 
 - With a query active, the search results (§9): plain text is the fuzzy finder, `/` is full-text.
-- With none, the **anchor** note's related notes — by reference first (inbound links), then by similar tags (`notes.related`, §5.3). The anchor is the last note opened (`Enter`); a session with nothing to restore starts from the most recently modified note.
+- With none, the **anchor** note and its related notes: the anchor first, then by reference (inbound links) and then by similar tags (`notes.related`, §5.3). `notes.related` never returns the note it is asked about, so the client prepends the anchor itself, which it already holds as the preview body. The anchor is the last note opened (`Enter`); a session with nothing to restore starts from the most recently modified note.
 
 The output is never held whole: it is paged in as the feed scrolls, and navigating or changing a criterion replaces or extends the sequence. Related notes are computed for the anchor note, not the marked one, so the sequence is frozen while the mark moves inside it; opening an entry re-anchors it to that note.
 
