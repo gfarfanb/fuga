@@ -685,10 +685,10 @@ Config is read once at startup. Adding or removing a source, or changing its opt
 | # | Milestone | Deliverable |
 |---|-----------|-------------|
 | M0 | Skeleton | Workspace, CI, config with sources, terminal setup and teardown with panic hook |
-| M1 | Core read path | Source walk, parser, SQLite schema, full index; CLI `fuga index` |
+| M1 | Core read path | Source walk, parser, SQLite schema, full index including link resolution (§6.3, §7.1); CLI `fuga index` |
 | M2 | Protocol | `fuga-protocol` types, local socket server, `fuga-client`, `fuga server start` |
 | M3 | Browse | TUI connects to server: layout (notes, criteria, preview, input, status bar), output and feed (related by reference and shared tags), session save/restore, open in `$EDITOR`, reindex on return |
-| M4 | Links | Wikilink resolution, backlinks as feed entries, follow link |
+| M4 | Links | Follow link from the preview; render resolved links and mark ambiguous or dangling ones (§10.6) |
 | M5 | Search | Input line and modes, fuzzy finder, FTS search with snippets |
 | M6 | Capture | Quick capture, dangling-link note creation |
 | M7 | Live | File watcher, incremental indexing, server events and client reconnection |
