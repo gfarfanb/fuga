@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fuga-core",
+    "crates/fuga-protocol",
+    "crates/fuga-server",
+    "crates/fuga-client",
+    "crates/fuga-tui",
+    "crates/fuga-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+repository = "https://github.com/rdpgfarfanb/fuga"
+
+[workspace.dependencies]
+fuga-core = { path = "crates/fuga-core" }
+fuga-protocol = { path = "crates/fuga-protocol" }
+fuga-server = { path = "crates/fuga-server" }
+fuga-client = { path = "crates/fuga-client" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+directories = "6"
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.8"
+
+[profile.release]
+lto = "thin"
