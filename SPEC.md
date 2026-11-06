@@ -62,7 +62,7 @@ The TUI is the first client, not the product. Anything the TUI can do is a serve
 ## 3. Non-Functional Requirements
 
 - **Performance:** cold start under 100 ms on an indexed source; full reindex of 10k notes under 10 s; search results under 50 ms; server round-trip under 5 ms on a local socket.
-- **Safety:** atomic writes (write temp file, then rename); the server never deletes a file inside a source except its own case-probe file (§12). v1 has no note-delete method (delete is external: the user removes the file and the watcher drops the index row, §7.2).
+- **Safety:** atomic writes (write temp file, then rename); the server never deletes a file inside a source except the case-probe file it created itself (§12). v1 has no note-delete method (delete is external: the user removes the file and the watcher drops the index row, §7.2).
 - **Portability:** no C toolchain required for end users; handle `\r\n` and `\n`; handle Windows path rules.
 - **Robustness:** malformed frontmatter or invalid UTF-8 must not crash the app; the note is indexed best-effort and flagged. A client disconnecting mid-request must never affect the server or other clients.
 
@@ -86,6 +86,7 @@ The TUI is the first client, not the product. Anything the TUI can do is a serve
 | Config | `serde` + `toml`, `directories` | Platform-correct config paths |
 | Local IPC | `interprocess` | Unix domain socket and Windows named pipe |
 | File locking | `fs4` | Exclusive lock elects one server instance |
+| Concurrency | `crossbeam-channel` | OS threads and channel `select!`; no `tokio` |
 | Serialization | `serde_json` | Request/response payloads |
 | Errors | `thiserror` (libs), `anyhow` (bins) | |
 | Logging | `tracing` + `tracing-appender` | Log to file, never to the TUI terminal |
@@ -192,9 +193,9 @@ fuga/
 ### 5.3 Protocol
 
 - **Framing:** newline-delimited JSON-RPC 2.0, one request or response per line. No HTTP, no streaming bodies; long results are chunked into paged responses.
-- **Transport:** a local socket — Unix domain socket or Windows named pipe, via `interprocess`. On Unix the default path is `$XDG_RUNTIME_DIR/fuga/fuga.sock` when `XDG_RUNTIME_DIR` is set, else `<config dir>/fuga.sock`; Windows uses the named pipe `\\.\pipe\fuga`. A path longer than `sun_path` (108 bytes on Linux, 104 on macOS — a deep home directory is enough) falls back to `<tmp>/fuga-<uid>/fuga.sock` in a 0700 directory, logged at startup, because no directory creation can shorten the config path; a `[server] socket` the user set too long is a config error rather than a silent override. Server and client resolve the path with the same function, so a client reaches the fallback too. An optional TCP mode on `127.0.0.1` exists for debugging and tests only; it requires a token.
-- **Access:** the local socket is created with owner-only permissions (0600). No authentication on the local socket; authentication (bearer token) is mandatory if TCP is enabled.
-- **Socket lifecycle:** the socket is owned by an exclusive advisory lock on a sibling `<socket>.lock` file (`fs4`), held for the server's whole lifetime so the OS releases it even on a crash. The lock file is created 0600 if absent and is never unlinked; a leftover file is harmless because the lock dies with its holder. A server takes the lock without blocking: held means another server is live (or still starting) and the new process exits without touching the socket; acquired means any socket file present is stale and is unlinked before binding. The bind's address-in-use error remains a defensive fallback. This replaces the connect-before-bind probe, whose check-then-unlink race let two servers started together each unlink the other's live socket. Windows named pipes leave no file to go stale, but the lock file elects the single owner there too.
+- **Transport:** a local socket — Unix domain socket or Windows named pipe, via `interprocess`. On Unix the default path is `$XDG_RUNTIME_DIR/fuga/fuga.sock` when `XDG_RUNTIME_DIR` is set, else `<config dir>/fuga.sock`; Windows uses a per-user named pipe `\\.\pipe\fuga-<user>`, where `<user>` is the account SID (or a stable hash of it), so two accounts on the same host never share a name. A path longer than `sun_path` (108 bytes on Linux, 104 on macOS — a deep home directory is enough) falls back to `<tmp>/fuga-<uid>/fuga.sock` in a 0700 directory, logged at startup, because no directory creation can shorten the config path; a `[server] socket` the user set too long is a config error rather than a silent override. Server and client resolve the path with the same function, so a client reaches the fallback too. An optional TCP mode on `127.0.0.1` exists for debugging and tests only; it requires a token.
+- **Access:** the local socket is created with owner-only permissions (0600). On Windows the pipe is created with an explicit security descriptor whose DACL grants access only to the owner's SID (and SYSTEM), matching the Unix `0600` guarantee rather than the process token's default DACL. No authentication on the local socket; authentication (bearer token) is mandatory if TCP is enabled.
+- **Socket lifecycle:** the socket is owned by an exclusive advisory lock on a sibling `<socket>.lock` file (`fs4`), held for the server's whole lifetime so the OS releases it even on a crash. The lock file is created 0600 if absent and is never unlinked; a leftover file is harmless because the lock dies with its holder. A server takes the lock without blocking: held means another server is live (or still starting) and the new process exits without touching the socket; acquired means any socket file present is stale and is unlinked before binding. The bind's address-in-use error remains a defensive fallback. This replaces the connect-before-bind probe, whose check-then-unlink race let two servers started together each unlink the other's live socket. Windows named pipes leave no file to go stale, but the lock file — `<config dir>/fuga.lock` there, since the pipe has no filesystem path — elects the single owner there too.
 - **Versioning:** the server reports `api_version` on `handshake`; a client with a mismatched major version refuses to run and prints an upgrade hint. The request/response/event types live in their own crate (`fuga-protocol`) so a TUI/server change shows up as a reviewable diff there.
 - **Errors:** JSON-RPC error objects with a stable `code` and a human `message`; never a panic. A malformed request line is answered with a parse error and the connection stays open.
 
@@ -218,7 +219,7 @@ Core methods (v1), all scoped by source where relevant:
 | `index.reindex` | Reindex one note from disk now, past the fast path |
 | `events.subscribe` | Server pushes `note.changed`, `note.removed`, `index.progress` |
 
-- **Note keys:** a note-scoped method addresses a note by `{ source, path }` — the source's config name and the source-relative path as it is spelled on disk, the identity defined in §6.2. The lookup runs on `path_key` (§12), so on a case-insensitive source a client that spells the case differently still reaches the note, and the reply echoes the path as it is on disk. A client never sends `notes.id` (a surrogate row key that a rebuild re-elects) or `uid` (nullable, and re-elected for a duplicate). So `notes.get` and `notes.write` take that pair (`notes.write` also takes the body); `note.changed` and `note.removed` events carry the same pair.
+- **Note keys:** a note-scoped method addresses a note by `{ source, path }` — the source's config name and the source-relative path as it is spelled on disk, the identity defined in §6.2. The lookup runs on `path_key` (§12), so on a case-insensitive source a client that spells the case differently still reaches the note, and the reply echoes the path as it is on disk. A client never sends `notes.id` (a surrogate row key that a rebuild re-elects) or `uid` (nullable, and not unique: a shared id is ambiguous, §6.3). So `notes.get` and `notes.write` take that pair (`notes.write` also takes the body); `note.changed` and `note.removed` events carry the same pair.
 
 - **Path safety.** Every `path` in a note key is validated before any filesystem call, read or write: it is relative, contains no `..` component, and is not absolute in the platform's terms (a leading `/` or `\`, a drive letter such as `C:`, or a UNC prefix). The server joins it to the source root and confirms the resolved result stays under that root, symlinks included, so `{ source: notes, path: ../outside.md }` and a note created from a dangling `[[../../x]]` link are `invalid params` (-32602). `notes.get`, `notes.write`, `notes.create`, `index.reindex`, and every other note-scoped method run this one check, and a rejected path never reaches a write, a temp file, or `create_dir_all` (§11).
 
@@ -289,7 +290,7 @@ Indexes live outside the sources, under the data dir (§11), one file per source
 <data dir>/index/work.db
 ```
 
-This keeps sources clean and read-only-safe. Deleting an index file is always safe.
+This keeps sources clean and read-only-safe: the only file fuga ever creates inside a source is the case-probe (§12), and a source that cannot be written is probed by writing nothing. Deleting an index file is always safe.
 
 ### 6.2 Note Format
 
@@ -311,7 +312,7 @@ See [[SQLite FTS5]] and [[Index design#Schema|schema]]. #draft
 - **Where the note id comes from:** the filename when it begins with a timestamp (`20261027T143012-rust-tui-stack.md`) — that prefix is why the id travels with the path, so renaming a note keeps its id links valid — otherwise the frontmatter `id`, the secondary key for files that already carry one. If both are present and differ, the filename wins. A future rename (§14, M10+) that lands a note on a timestamp-prefixed filename therefore adopts that timestamp as its `uid` — the filename still wins — and the link rewrite moves any `[[old-id]]` links with it; a new path without a timestamp keeps the existing `uid`.
 - If neither carries an id, the indexer assigns one and writes it back only if `auto_write_id = true` for that source; otherwise `uid` stays `NULL` and path identity is used and the file is never modified. Index and files stay in sync in both directions: a write-back updates the file, and an external edit of the `id` is picked up on the next scan.
 - **Write-back preserves the rest of the file.** Frontmatter is *parsed* with `serde_yaml_ng` (§8), but never re-serialized: a round-trip would drop comments, reorder keys, and restyle quoting. The write-back is a raw-text edit of the existing `---` block — insert one `id: <value>` line, either after the opening `---` (if the block is otherwise empty) or as the last line of the block — and every other byte of the file is left untouched, including comments, key order, quoting, and `\r\n` vs `\n` line endings. If the file has no frontmatter block, one is prepended as `---\nid: <value>\n---\n`. If the block is malformed (bit0, §6.4), or already carries an `id`, the file is not written back. The edit goes through the atomic temp-file-plus-rename path (§3), so a crash never leaves a half-written note.
-- A note id is unique per source (`idx_notes_uid`), so two notes sharing one are a copy, not an error: the path that sorts first keeps the id, the other keeps `uid = NULL` (path identity) and is flagged (bit2). Incremental updates never move an id between notes; a full rebuild re-elects.
+- A note id is meant to be unique per source, but two notes sharing one are a copy, not an error: each keeps the `uid` its file carries, so the index never moves an id between notes and a full rebuild does not re-elect — an incremental update and a rebuild produce the same rows. Every note that carries the shared id is flagged (bit2), and a link that matches it is ambiguous (§6.3), so it is surfaced instead of silently pointing at whichever copy an election picked.
 - **Generating a note id.** When the server creates a note (quick capture, a note from a dangling link), the id is the local time at creation in the `YYYYMMDDTHHMMSS` form, walked forward one second at a time until it is free in the source — so the first capture in a second keeps that second's id and each later one takes the next free id. The target filename starts with the id (`<id>.md`, or `<id>-<title slug>.md`), so the same walk also skips a path that already exists on disk, and the create is exclusive: capture never replaces an existing file.
 - **Title resolution order:** frontmatter `title` → first `# H1` → filename stem.
 - **Tags:** frontmatter `tags` (a YAML sequence) and inline `#tags` merge per note by a canonical key (§8.1). The spelling is kept as written and is never normalized in the file.
@@ -323,7 +324,7 @@ Links resolve within the note's own source unless the target is prefixed with a 
 
 For `[[target]]`, match case-insensitively in order:
 
-1. Exact note id — `notes.uid`, the timestamped id indexed by `idx_notes_uid`, so `[[20261027T143012]]` is one index lookup and never a path scan
+1. Exact note id — `notes.uid`, the timestamped id indexed by `idx_notes_uid`, so `[[20261027T143012]]` is one index lookup and never a path scan; when several notes carry the id the match is ambiguous (below)
 2. Exact title
 3. Alias
 4. Filename stem
@@ -331,7 +332,7 @@ For `[[target]]`, match case-insensitively in order:
 
 Every step is one index lookup — `idx_notes_uid`, `idx_notes_title`, `idx_aliases_alias`, `idx_notes_stem`, `idx_notes_path_nocase` (step 5 runs on `path_key` instead when the source folds case, §12) — so link resolution never scans `notes`, however many links a source has.
 
-Ambiguity: choose the shortest path, flag the link as `ambiguous` in the index, and surface it in the UI (the preview marks the link and lists the candidates). Unresolved links are stored with `target_note_id = NULL` (dangling).
+Ambiguity — a duplicate note id, or a shared title, alias, stem or path: choose the shortest path, then the smallest `path_key` so the choice is the same after an incremental update and after a full rebuild, flag the link as `ambiguous` in the index, and surface it in the UI (the preview marks the link and lists the candidates). Unresolved links are stored with `target_note_id = NULL` (dangling).
 
 ### 6.4 SQLite Schema
 
@@ -352,13 +353,13 @@ CREATE TABLE sources (
   name      TEXT NOT NULL UNIQUE, -- config key
   root      TEXT NOT NULL,        -- absolute path at last index
   enabled   INTEGER NOT NULL DEFAULT 1,
-  case_insensitive INTEGER NOT NULL DEFAULT 0  -- probed once on first full scan (§12)
+  case_insensitive INTEGER NOT NULL DEFAULT 0  -- probed on a full scan; 0 while unprobed or skipped (§12)
 );
 
 CREATE TABLE notes (
   id           INTEGER PRIMARY KEY,
   source_id    INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-  uid          TEXT,             -- note id: filename timestamp, else frontmatter id; nullable
+  uid          TEXT,             -- note id: filename timestamp, else frontmatter id; nullable, not unique (a copy shares it)
   path         TEXT NOT NULL,    -- source-relative, '/' separated, on-disk casing (display and FS calls)
   path_key     TEXT NOT NULL,    -- identity: `path` byte for byte, or its NFC-normalized lowercase when the source's filesystem is case-insensitive (§12)
   stem         TEXT NOT NULL,    -- filename without directories and `.md`; derived for the title fallback (§6.2)
@@ -372,7 +373,9 @@ CREATE TABLE notes (
   UNIQUE (source_id, path_key)   -- not `path`: a CI source has one row per file whichever case the walk reports,
                                  -- while a case-sensitive source keeps `Notes/A.md` and `notes/a.md` as two notes
 );
-CREATE UNIQUE INDEX idx_notes_uid ON notes(source_id, uid) WHERE uid IS NOT NULL;
+CREATE INDEX idx_notes_uid ON notes(source_id, uid) WHERE uid IS NOT NULL;
+-- Not UNIQUE: two notes can share an id (a copy). Both rows keep it and are
+-- flagged bit2; step 1 of link resolution then treats the match as ambiguous.
 -- Resolution steps 2, 4 and 5 (§6.3). The query must compare with the same
 -- COLLATE NOCASE, otherwise it is a per-link scan of the whole source.
 -- NOCASE folds ASCII only, so non-ASCII titles/stems match case-sensitively.
@@ -433,7 +436,7 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 ### 7.1 Full Scan
 
 1. Walk the source with `ignore` (skip hidden dirs, non-`.md`, and the configured `exclude` globs).
-2. For each file, look it up by `path_key` (§12) and compare `(mtime_ns, size)` to the DB. If unchanged, skip.
+2. For each file, look it up by `path_key` (§12) and compare `(mtime_ns, size)` to the DB. If unchanged, skip. On a source the poll backend watches (§12) a match is trusted only when `mtime_ns` is older than the poll interval plus the coarse-timestamp granularity (a couple of seconds): FAT, SMB and NFS can leave `mtime_ns` and size unchanged across two same-size edits in one tick, so a recently modified file is read and hash-compared (step 3) instead, which still skips the parse when the bytes are unchanged.
 3. If changed, read the file, compute `blake3`; if the hash is equal, update mtime only.
 4. Otherwise parse and upsert note, aliases, tags, links in one transaction.
 5. Delete the rows whose `path_key` the walk did not produce. Not "rows whose file no longer exists": `Path::exists` answers yes for a stored path that differs from the disk only in case or Unicode normal form, which is exactly the case this step has to clean up (§12). This pass runs only for a source whose root was read successfully: an unavailable root (§11) marks the source unavailable and deletes nothing, so its notes stay in the index (§7.2).
@@ -654,6 +657,8 @@ edit_external = "ctrl-e"  # action id (§10.3) = key string; unlisted actions ke
 
 `[ui].date_format` is display-only: it formats the note timestamps the UI shows and never contributes to a note id, filename, or path (§6.2).
 
+Each `[[sources]]` `name` is validated when the config is read, before any path is derived from it: it is non-empty, contains no path separator and no `.` or `..` component, is not a Windows-reserved device name (`CON`, `NUL`, `COM1`…; `<name>.db` would inherit the reservation), and contains none of `<>:"/\|?*` or `[]#` — the characters Windows forbids in a filename and the ones that delimit a wikilink's source prefix (`[[work:…]]`, §6.3). A name that fails, or a duplicate name, is a config error at startup, so a bad config can never make the index land outside `<data dir>/index` (§6.1); names are otherwise used verbatim.
+
 CLI flags override the config, and the config overrides defaults. A source whose `path` does not exist is reported as unavailable in the TUI status bar and skipped by indexing; it is never created implicitly — the root is the user's own location, and creating an empty directory there would hide an unmounted drive or a typo behind a source that looks merely empty.
 
 The source's *subdirectories* are the opposite case: `capture_dir` is created on demand with `create_dir_all` the first time a note lands in it, and any parent directory of a path passed to `notes.create` (e.g. a note made from a dangling `[[folder/note]]` link) is created the same way, because the configured directory is where the note the user just asked for has to go, once the path has passed the §5.3 check. A create or capture against an unavailable source fails with the source-unavailable error and creates nothing.
@@ -665,11 +670,11 @@ Config is read once at startup. Adding or removing a source, or changing its opt
 ## 12. Cross-Platform Notes
 
 - Store paths in the DB as source-relative with `/`; convert at the FS boundary.
-- Case-insensitive filesystems (Windows, macOS): compare link targets case-insensitively, but preserve original case on disk. This reaches the index identity too. A source's filesystem is probed once, on its first full scan — create a hidden, non-`.md` probe file (`.fuga-case-probe`) in the root, look it up with its case flipped, then delete it immediately — and cached in `sources.case_insensitive`; the walk (§7.1 step 1) and the watcher (§7.2) ignore it, so it never surfaces as a note. A probe beats a platform guess because a macOS volume can be case-sensitive and an NTFS directory can opt in, and it beats a `GetVolumeInformationW` / `getattrlist` call because those answer per volume, not per directory, and because the probe keeps both outcomes testable on Linux (§13). For a case-insensitive source, `path_key` is `path` lowercased and NFC-normalized (macOS matches by normalization as well as case, so `Café.md` and the NFD spelling are one file) and lookups fold the same way; for a case-sensitive source `path_key` is `path` byte for byte. Only the key folds: `path` always keeps the on-disk spelling, and no path is ever rewritten. `str::to_lowercase` rather than SQLite's `NOCASE`, which folds ASCII only — `Ä` and `ä` are one file to Windows and macOS.
+- Case-insensitive filesystems (Windows, macOS): compare link targets case-insensitively, but preserve original case on disk. This reaches the index identity too. A source's filesystem is probed once, on its first full scan — create a hidden, non-`.md` probe file (`.fuga-case-probe`) in the root with `create_new` (O_EXCL), look it up with its case flipped, then delete the file the probe itself created — and cached in `sources.case_insensitive`; the walk (§7.1 step 1) and the watcher (§7.2) ignore it, so it never surfaces as a note. The probe never touches a file it did not create: it checks both spellings first, and if either already exists, or the create fails for any reason (a read-only source, a permission error), it writes nothing and treats the source as case-sensitive — the conservative default, under which lookups stop folding case, so a differently-cased client path can miss a note but no file is overwritten, merged or lost. A skipped probe is not cached, so a later full scan retries it. A probe beats a platform guess because a macOS volume can be case-sensitive and an NTFS directory can opt in, and it beats a `GetVolumeInformationW` / `getattrlist` call because those answer per volume, not per directory, and because the probe keeps both outcomes testable on Linux (§13). For a case-insensitive source, `path_key` is `path` lowercased and NFC-normalized (macOS matches by normalization as well as case, so `Café.md` and the NFD spelling are one file) and lookups fold the same way; for a case-sensitive source `path_key` is `path` byte for byte. Only the key folds: `path` always keeps the on-disk spelling, and no path is ever rewritten. `str::to_lowercase` rather than SQLite's `NOCASE`, which folds ASCII only — `Ä` and `ä` are one file to Windows and macOS.
 - Reserved Windows filenames (`CON`, `NUL`, etc.) and illegal characters must be sanitized when generating filenames from titles.
 - Handle both `\n` and `\r\n` on read; preserve the file's existing line endings on write.
 - `notify` uses `ReadDirectoryChangesW` on Windows and inotify on Linux. The native backend delivers nothing on a network filesystem and fails silently, so the watcher chooses the polling backend when detection says the source root is remote: Windows `GetDriveTypeW` returns `DRIVE_REMOTE`, or the path is a `\\` UNC path; Unix `statfs` reports NFS, CIFS/SMB, or FUSE. Because a FUSE or VM mount can lie about itself, the per-source `watch_mode` (`"auto"` default, or `"native"`/`"poll"` to override detection) wins, `[index].poll_interval_ms` (default 2000) sets the polling interval, and the chosen backend is logged at startup.
-- Local IPC uses a Unix domain socket on Unix and a named pipe on Windows, both through `interprocess`. The pipe lives in the `\\.\pipe\` namespace, so it has no path length limit; the Unix socket path is resolved as in §5.3 and falls back to a short per-user path under the temp dir when the config dir is too deep.
+- Local IPC uses a Unix domain socket on Unix and a named pipe on Windows, both through `interprocess`. The pipe lives in the `\\.\pipe\` namespace, so it has no path length limit; its name carries the user SID and its DACL is owner-only, so it is per-user in both name and access (§5.3). The Unix socket path is resolved as in §5.3 and falls back to a short per-user path under the temp dir when the config dir is too deep.
 - Requires Windows Terminal (or any VT-capable terminal) for correct color and Unicode; legacy `cmd.exe` is unsupported.
 - Release builds: `x86_64-unknown-linux-musl` (static) and `x86_64-pc-windows-msvc`, for both `fuga` (server/CLI) and `fuga-tui`.
 
@@ -680,10 +685,11 @@ Config is read once at startup. Adding or removing a source, or changing its opt
 | Level | Approach |
 |-------|----------|
 | Parser | Unit tests plus `proptest` (never panics on arbitrary input); table-driven `TagKey` cases (case, camel/snake/kebab, acronyms, digits, Unicode, separator-only, frontmatter-plus-inline dedupe) |
-| Indexer | Fixture sources in `tempfile`; assert DB state after create/modify/rename/delete of a file on disk (delete is external, §3), and after starting the indexer with a source added to or removed from the config (§11). Case folding is driven by the fixture's `case_insensitive` flag, so both sides are testable on Linux: a case-only path change leaves one row with its `uid` and no bit2 flag on a case-insensitive source, and keeps `Notes/A.md` plus `notes/a.md` as two notes on a case-sensitive one. One real-filesystem case-only rename on the Windows matrix leg. |
+| Indexer | Fixture sources in `tempfile`; assert DB state after create/modify/rename/delete of a file on disk (delete is external, §3), and after starting the indexer with a source added to or removed from the config (§11). Case folding is driven by the fixture's `case_insensitive` flag, so both sides are testable on Linux: a case-only path change leaves one row with its `uid` and no bit2 flag on a case-insensitive source, and keeps `Notes/A.md` plus `notes/a.md` as two notes on a case-sensitive one; a copied note id stays on both rows with bit2 set on each, and a link to it resolves to the shortest `path_key` and is flagged ambiguous; the probe is skipped and the source left untouched, case-sensitive, when either probe spelling already exists or the root is read-only. One real-filesystem case-only rename on the Windows matrix leg. |
 | Link resolution | Table-driven tests for ambiguity, aliases, case, dangling links, and per-source scoping |
 | Search | Golden queries with `insta` snapshots; `tag:` spellings that must all hit the same tag |
 | Protocol | Round-trip serialization tests for every request/response type; malformed-input tests must not kill the connection |
+| Config | Source names that are empty, contain a separator, `.`/`..`, a Windows-reserved device name, or a wikilink delimiter are rejected at load; a duplicate name is rejected |
 | Path safety | `notes.get`, `notes.write` and `notes.create` with `..`, an absolute path, a drive letter or a UNC prefix are `invalid params`, and no file outside the source root is created or overwritten; a symlink under the root that points out is refused |
 | Server | In-process server on a temp socket; integration tests for dispatch, subscriptions, and concurrent clients |
 | TUI | Render to `ratatui::backend::TestBackend`, snapshot buffers, with a fake client; session save/restore round-trips, and a missing or corrupt session file falls back to defaults |
@@ -705,5 +711,5 @@ Config is read once at startup. Adding or removing a source, or changing its opt
 | M6 | Capture | Quick capture, dangling-link note creation |
 | M7 | Live | File watcher, incremental indexing, server events and client reconnection |
 | M8 | Multi-source | Source switching, per-source config, cross-source list and search filters |
-| M9 | Polish | Tags and filter terms as criteria-tree nodes, unlinked mentions, themes, config, release builds, node-per-heading style notes |
+| M9 | Polish | Tags and filter terms as criteria-tree nodes, unlinked mentions, themes, config, release builds |
 | M10+ | Stretch | Rename with link rewrite, graph view, additional clients, built-in editor (§10.5) |
